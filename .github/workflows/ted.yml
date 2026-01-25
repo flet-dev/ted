@@ -214,16 +214,6 @@ jobs:
           echo "Target repo: $(cat .ted/target_repo.txt)"
           echo "Target issue: $(cat .ted/target_issue.txt)"
 
-      - name: Install Codex CLI
-        run: |
-          set -euo pipefail
-          curl -L -o /tmp/codex.tgz \
-            https://github.com/openai/codex/releases/latest/download/codex-x86_64-unknown-linux-musl.tar.gz
-          tar -xzf /tmp/codex.tgz -C /tmp
-          mv /tmp/codex-x86_64-unknown-linux-musl /usr/local/bin/codex
-          chmod +x /usr/local/bin/codex
-          codex --version
-
       # Fresh IAT here (the action revokes tokens after the job by default)
       - name: Create GitHub App token (IAT)
         id: app-token
@@ -232,70 +222,32 @@ jobs:
           app-id: ${{ secrets.TED_APP_ID }}
           private-key: ${{ secrets.TED_APP_PRIVATE_KEY }}
 
-      - name: Configure Codex MCP (remote GitHub MCP)
-        run: |
-          set -euo pipefail
-          mkdir -p ~/.codex
-          cat > ~/.codex/config.toml <<'TOML'
-          [mcp_servers.github]
-          url = "https://api.githubcopilot.com/mcp/"
-          bearer_token_env_var = "GITHUB_MCP_BEARER"
-          http_headers = { "X-MCP-Toolsets" = "context,issues,repos" }
-          startup_timeout_sec = 20
-          tool_timeout_sec = 60
-          enabled = true
-          TOML
-
-      - name: Post approved draft via MCP (no edits)
+      - name: Post approved draft via GitHub API (IAT only)
         if: needs.draft.outputs.should_post == 'true'
         env:
-          CODEX_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          GITHUB_MCP_BEARER: ${{ steps.app-token.outputs.token }}
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           set -euo pipefail
+          repo_full="$(cat .ted/target_repo.txt)"      # e.g. flet-dev/ted
+          issue_no="$(cat .ted/target_issue.txt)"      # e.g. 232
           body="$(jq -r '.draft_body' .ted/draft.json)"
 
-          cat > .ted/post.schema.json <<'JSON'
-          { "type":"object", "properties": { "posted": { "type":"boolean" } }, "required":["posted"], "additionalProperties": false }
-          JSON
+          body_json="$(jq -Rs . <<<"$body")"
+          payload="{\"body\":$body_json}"
 
-          # Build prompt from agent file + post task wrapper
-          cat .codex/agents/tedthebot.md > .ted/post.prompt.txt
-          cat >> .ted/post.prompt.txt <<PROMPT
+          curl -sS -f \
+            -X POST \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$repo_full/issues/$issue_no/comments" \
+            -d "$payload" >/tmp/ted_post.json
 
-          ---
-          POST PHASE TASK (APPROVED)
+          echo "Posted comment: $(jq -r '.html_url // empty' /tmp/ted_post.json)"
 
-          You MUST post the comment using GitHub MCP to:
-
-          Repository: read from file .ted/target_repo.txt
-          Issue number: read from file .ted/target_issue.txt
-
-          You are NOT allowed to infer or guess the repository or issue.
-
-          Post EXACTLY the following comment body to the issue that triggered this workflow using the MCP tool "github__add_issue_comment".
-          Do not reword or edit. Use the correct owner/repo and issue number for the triggering issue.
-
-          Comment body:
-          ---
-          ${body}
-          ---
-          Output {"posted": true} only if the MCP tool call succeeded.
-          PROMPT
-
-          codex exec --json --output-schema .ted/post.schema.json -o .ted/post.out.json "$(cat .ted/post.prompt.txt)" | tee .ted/codex_events.jsonl
-
-          echo "===== Result ====="
-          cat .ted/post.out.json
-
-          echo "===== Tool-call diagnostics (grep) ====="
-          grep -Ei 'tool|error|fail|unauthorized|forbidden|readonly' .ted/codex_events.jsonl || true
-
-      - name: Apply escalation labels via MCP (approved)
+      - name: Apply escalation labels via GitHub API (IAT only)
         if: needs.draft.outputs.escalate == 'true'
         env:
-            CODEX_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-            GITHUB_MCP_BEARER: ${{ steps.app-token.outputs.token }}
+            GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
             set -euo pipefail
 
@@ -309,8 +261,6 @@ jobs:
             # Write canonical target (prevents cross-repo mistakes)
             repo_full="$(cat .ted/target_repo.txt)"      # e.g. flet-dev/ted
             issue_no="$(cat .ted/target_issue.txt)"      # e.g. 232
-            owner="${repo_full%%/*}"
-            repo="${repo_full##*/}"
 
             # Labels to add
             jq -r '.labels_to_add[]' .ted/draft.json > .ted/labels.txt || true
@@ -320,38 +270,14 @@ jobs:
             exit 0
             fi
 
-            # Ask Codex to apply labels using whatever MCP tool is available
-            cat > .ted/labels.schema.json <<'JSON'
-            { "type":"object", "properties": { "labeled": { "type":"boolean" } }, "required":["labeled"], "additionalProperties": false }
-            JSON
+            labels_json="$(jq -R -s 'split("\n") | map(select(length>0))' .ted/labels.txt)"
+            payload="{\"labels\":$labels_json}"
 
-            cat > .ted/labels.prompt.txt <<'PROMPT'
-            You are TedTheBot.
+            curl -sS -f \
+              -X POST \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/$repo_full/issues/$issue_no/labels" \
+              -d "$payload" >/tmp/ted_labels.json
 
-            TASK: Apply labels to a GitHub issue using GitHub MCP.
-
-            You MUST apply labels to:
-            - owner: read from .ted/owner.txt
-            - repo: read from .ted/repo.txt
-            - issue_number: read from .ted/issue.txt
-
-            Labels to apply are listed in .ted/labels.txt (one per line).
-            Use the appropriate GitHub MCP tool for adding labels to an issue (follow the tool schema you see).
-            Do not change owner/repo/issue_number. Do not apply labels anywhere else.
-
-            Output JSON: {"labeled": true} only if labels were successfully applied.
-            PROMPT
-
-            printf "%s" "$owner" > .ted/owner.txt
-            printf "%s" "$repo"  > .ted/repo.txt
-            printf "%s" "$issue_no" > .ted/issue.txt
-
-            codex exec --json \
-            --output-schema .ted/labels.schema.json \
-            -o .ted/labels.out.json \
-            "$(cat .ted/labels.prompt.txt)" | tee .ted/labels_events.jsonl
-
-            echo "===== Label result ====="
-            cat .ted/labels.out.json
-            echo "===== Label tool diagnostics ====="
-            grep -Ei 'tool|error|fail|unauthorized|forbidden|repo|owner|issue|label' .ted/labels_events.jsonl || true
+            echo "Applied labels: $(jq -r '.[]?.name // empty' /tmp/ted_labels.json | paste -sd, -)"
