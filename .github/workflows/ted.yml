@@ -168,7 +168,7 @@ jobs:
           echo "### Escalation" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "- escalate: $(jq -r '.escalate' .ted/draft.json)" >> "$GITHUB_STEP_SUMMARY"
-          echo "- labels_to_add: $(jq -r '.labels_to_add | join(\", \")' .ted/draft.json)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- labels_to_add: `$(jq -r '.labels_to_add | join(\", \")' .ted/draft.json)" >> "$GITHUB_STEP_SUMMARY"`
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "### Dev summary" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
