@@ -235,5 +235,10 @@ jobs:
           Output {"posted": true} only if the MCP tool call succeeded.
           PROMPT
 
-          codex exec --output-schema .ted/post.schema.json -o .ted/post.out.json "$(cat .ted/post.prompt.txt)"
+          codex exec --json --output-schema .ted/post.schema.json -o .ted/post.out.json "$(cat .ted/post.prompt.txt)" | tee .ted/codex_events.jsonl
+
+          echo "===== Result ====="
           cat .ted/post.out.json
+
+          echo "===== Tool-call diagnostics (grep) ====="
+          grep -Ei 'tool|error|fail|unauthorized|forbidden|readonly' .ted/codex_events.jsonl || true
