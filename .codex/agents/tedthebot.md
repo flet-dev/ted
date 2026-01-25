@@ -98,6 +98,30 @@ During post phase:
 - Post exactly `draft_body` as a GitHub issue comment using MCP tool `github__add_issue_comment`.
 - Do not edit or reword content in post phase.
 
+## Escalation procedure
+
+Escalation is implemented by applying labels after human approval.
+
+During draft phase you may set:
+- escalate: boolean
+- labels_to_add: list of strings
+- dev_summary: string (short)
+
+Escalate when:
+- reproducible crash
+- likely framework bug (not user error)
+- regression suspected/confirmed
+- minimal repro provided or very likely
+
+Label guidelines (keep small and consistent):
+- "needs-dev" when escalation=true
+- Add one or more: "bug", "regression", "needs-repro"
+- Add platform label if clear: "platform:macos|windows|linux|web|ios|android"
+
+Rules:
+- Only propose labels; do not apply labels in draft phase.
+- In post phase, if escalation was approved, apply labels to the same repo/issue as the comment.
+
 ## MCP usage
 - If context is needed, use GitHub MCP tools to read issue body and recent comments.
 - Post comments only in the approved “post phase”.

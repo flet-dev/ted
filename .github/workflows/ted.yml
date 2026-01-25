@@ -92,12 +92,19 @@ jobs:
           # Output schema for draft phase
           cat > .ted/draft.schema.json <<'JSON'
           {
-            "type": "object",
-            "properties": {
+          "type": "object",
+          "properties": {
               "should_post": { "type": "boolean" },
-              "draft_body": { "type": "string" }
+              "draft_body": { "type": "string" },
+
+              "escalate": { "type": "boolean" },
+              "labels_to_add": {
+              "type": "array",
+              "items": { "type": "string" }
+              },
+              "dev_summary": { "type": "string" }
             },
-            "required": ["should_post", "draft_body"],
+            "required": ["should_post", "draft_body", "escalate", "labels_to_add", "dev_summary"],
             "additionalProperties": false
           }
           JSON
@@ -114,6 +121,14 @@ jobs:
           Produce JSON that matches .ted/draft.schema.json:
           - should_post: true only if a helpful reply is warranted
           - draft_body: the proposed reply in GitHub-flavored Markdown
+
+          Also decide if this should be escalated to developers.
+
+          - If escalate=true, include "needs-dev" in labels_to_add.
+          - labels_to_add must be a small set (0-5), from: needs-dev, bug, regression, needs-repro, platform:macos, platform:windows, platform:linux, platform:web, platform:ios, platform:android
+          - dev_summary must be a short 3-6 bullet summary for maintainers (no secrets).
+
+            Do NOT apply labels in draft phase.
 
           Constraints:
           - Do NOT post to GitHub in draft phase.
@@ -148,6 +163,16 @@ jobs:
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo '```md' >> "$GITHUB_STEP_SUMMARY"
           jq -r '.draft_body' .ted/draft.json >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "### Escalation" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- escalate: $(jq -r '.escalate' .ted/draft.json)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- labels_to_add: $(jq -r '.labels_to_add | join(\", \")' .ted/draft.json)" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Dev summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          jq -r '.dev_summary' .ted/draft.json >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload draft artifact (private)
@@ -257,3 +282,67 @@ jobs:
 
           echo "===== Tool-call diagnostics (grep) ====="
           grep -Ei 'tool|error|fail|unauthorized|forbidden|readonly' .ted/codex_events.jsonl || true
+
+      - name: Apply escalation labels via MCP (approved)
+        env:
+            CODEX_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+            GITHUB_MCP_BEARER: ${{ steps.app-token.outputs.token }}
+        run: |
+            set -euo pipefail
+
+            # Only run if escalation was requested in the approved draft
+            esc="$(jq -r '.escalate' .ted/draft.json)"
+            if [[ "$esc" != "true" ]]; then
+            echo "No escalation requested."
+            exit 0
+            fi
+
+            # Write canonical target (prevents cross-repo mistakes)
+            repo_full="$(cat .ted/target_repo.txt)"      # e.g. flet-dev/ted
+            issue_no="$(cat .ted/target_issue.txt)"      # e.g. 232
+            owner="${repo_full%%/*}"
+            repo="${repo_full##*/}"
+
+            # Labels to add
+            jq -r '.labels_to_add[]' .ted/draft.json > .ted/labels.txt || true
+
+            if [[ ! -s .ted/labels.txt ]]; then
+            echo "Escalate=true but labels_to_add empty; skipping."
+            exit 0
+            fi
+
+            # Ask Codex to apply labels using whatever MCP tool is available
+            cat > .ted/labels.schema.json <<'JSON'
+            { "type":"object", "properties": { "labeled": { "type":"boolean" } }, "required":["labeled"], "additionalProperties": false }
+            JSON
+
+            cat > .ted/labels.prompt.txt <<'PROMPT'
+            You are TedTheBot.
+
+            TASK: Apply labels to a GitHub issue using GitHub MCP.
+
+            You MUST apply labels to:
+            - owner: read from .ted/owner.txt
+            - repo: read from .ted/repo.txt
+            - issue_number: read from .ted/issue.txt
+
+            Labels to apply are listed in .ted/labels.txt (one per line).
+            Use the appropriate GitHub MCP tool for adding labels to an issue (follow the tool schema you see).
+            Do not change owner/repo/issue_number. Do not apply labels anywhere else.
+
+            Output JSON: {"labeled": true} only if labels were successfully applied.
+            PROMPT
+
+            printf "%s" "$owner" > .ted/owner.txt
+            printf "%s" "$repo"  > .ted/repo.txt
+            printf "%s" "$issue_no" > .ted/issue.txt
+
+            codex exec --json \
+            --output-schema .ted/labels.schema.json \
+            -o .ted/labels.out.json \
+            "$(cat .ted/labels.prompt.txt)" | tee .ted/labels_events.jsonl
+
+            echo "===== Label result ====="
+            cat .ted/labels.out.json
+            echo "===== Label tool diagnostics ====="
+            grep -Ei 'tool|error|fail|unauthorized|forbidden|repo|owner|issue|label' .ted/labels_events.jsonl || true
