@@ -14,7 +14,7 @@ jobs:
   draft:
     runs-on: ubuntu-latest
 
-    # Skip PRs (issue_comment triggers for PRs too)
+    # Skip PRs (issue_comment fires on PRs too)
     if: >
       (github.event_name != 'issue_comment') ||
       (github.event.issue.pull_request == null)
@@ -25,7 +25,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Optional: only act on trusted commenters for issue_comment
+      # Optional: only act on trusted commenters
       - name: Guard - trusted commenters only
         if: github.event_name == 'issue_comment'
         run: |
@@ -36,24 +36,18 @@ jobs:
             *) echo "Untrusted author_association=$assoc; skipping."; exit 0 ;;
           esac
 
-      # Skip bot actors & commands
-      - name: Guard - skip commands/bots (safe)
+      # IMPORTANT: read comment body safely from $GITHUB_EVENT_PATH (no inline expansion)
+      - name: Guard - skip bots and /ted commands (safe)
         if: github.event_name == 'issue_comment'
         run: |
-            set -euo pipefail
+          set -euo pipefail
+          actor="${{ github.actor }}"
+          body="$(jq -r '.comment.body // ""' "$GITHUB_EVENT_PATH")"
 
-            actor="${{ github.actor }}"
-            body="$(jq -r '.comment.body // ""' "$GITHUB_EVENT_PATH")"
-
-            if [[ "$actor" == *"[bot]" ]] || [[ "$actor" == "github-actions" ]] || [[ "$actor" == "github-actions[bot]" ]]; then
+          if [[ "$actor" == *"[bot]" ]] || [[ "$actor" == "github-actions" ]] || [[ "$actor" == "github-actions[bot]" ]]; then
             echo "Bot actor ($actor); skipping."
             exit 0
-            fi
-
-            if [[ "$body" =~ ^/ted[[:space:]] ]]; then
-            echo "Ted command; skipping."
-            exit 0
-            fi
+          fi
 
       - name: Install Codex CLI
         run: |
@@ -65,7 +59,7 @@ jobs:
           chmod +x /usr/local/bin/codex
           codex --version
 
-      # GitHub App IAT for *reading via MCP* during draft generation
+      # IAT for MCP reads during drafting
       - name: Create GitHub App token (IAT)
         id: app-token
         uses: actions/create-github-app-token@v1
@@ -87,12 +81,15 @@ jobs:
           enabled = true
           TOML
 
-      - name: Prepare prompt + schema + payload
+      - name: Prepare prompt (from files) + schema + payload
         run: |
           set -euo pipefail
           mkdir -p .ted
-          cp "${GITHUB_EVENT_PATH}" .ted/event.json
 
+          # Save event payload for Codex to read
+          cp "$GITHUB_EVENT_PATH" .ted/event.json
+
+          # Output schema for draft phase
           cat > .ted/draft.schema.json <<'JSON'
           {
             "type": "object",
@@ -105,24 +102,22 @@ jobs:
           }
           JSON
 
-          cat > .ted/draft.prompt.txt <<'PROMPT'
-          You are TedTheBot (tier-0/tier-1 GitHub support).
+          # Build prompt from agent file + a small task wrapper (no hard-coded agent rules here)
+          cat .codex/agents/tedthebot.md > .ted/prompt.txt
+          cat >> .ted/prompt.txt <<'PROMPT'
 
-          The full GitHub webhook payload is in .ted/event.json.
+          ---
+          DRAFT PHASE TASK
 
-          Task:
-          1) Decide whether a reply is needed (should_post).
-             - For issue_comment: reply only if the new comment is a question / help request.
-             - Skip "+1", "thanks", emojis, or non-questions.
-          2) If replying, draft a concise, actionable response (draft_body).
-          3) DO NOT post anything to GitHub in this step.
+          The GitHub webhook payload is in: .ted/event.json
 
-          Guidance:
-          - If needed, use GitHub MCP tools to read the issue and recent comments for context.
-          - Never include secrets.
-          - If info is missing, ask with a short checklist.
+          Produce JSON that matches .ted/draft.schema.json:
+          - should_post: true only if a helpful reply is warranted
+          - draft_body: the proposed reply in GitHub-flavored Markdown
 
-          Output MUST match .ted/draft.schema.json.
+          Constraints:
+          - Do NOT post to GitHub in draft phase.
+          - If you need more context, use GitHub MCP tools to read the issue and recent comments.
           PROMPT
 
       - name: Run Codex (generate draft only)
@@ -131,7 +126,7 @@ jobs:
           GITHUB_MCP_BEARER: ${{ steps.app-token.outputs.token }}
         run: |
           set -euo pipefail
-          codex exec --output-schema .ted/draft.schema.json -o .ted/draft.json "$(cat .ted/draft.prompt.txt)"
+          codex exec --output-schema .ted/draft.schema.json -o .ted/draft.json "$(cat .ted/prompt.txt)"
           cat .ted/draft.json
 
       - name: Expose should_post output
@@ -165,10 +160,9 @@ jobs:
     needs: draft
     runs-on: ubuntu-latest
 
-    # Only run when Ted decided a reply is needed
     if: needs.draft.outputs.should_post == 'true'
 
-    # Manual approval gate
+    # Approval gate — configure in repo Settings → Environments → "ted-approval"
     environment: ted-approval
 
     steps:
@@ -190,7 +184,7 @@ jobs:
           chmod +x /usr/local/bin/codex
           codex --version
 
-      # Fresh IAT in this job (recommended; previous job’s token is revoked by default)
+      # Fresh IAT here (the action revokes tokens after the job by default)
       - name: Create GitHub App token (IAT)
         id: app-token
         uses: actions/create-github-app-token@v1
@@ -212,23 +206,29 @@ jobs:
           enabled = true
           TOML
 
-      - name: Post approved draft via MCP (Codex makes the tool call)
+      - name: Post approved draft via MCP (no edits)
         env:
           CODEX_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           GITHUB_MCP_BEARER: ${{ steps.app-token.outputs.token }}
         run: |
           set -euo pipefail
-          test -f .ted/draft.json
           body="$(jq -r '.draft_body' .ted/draft.json)"
 
           cat > .ted/post.schema.json <<'JSON'
           { "type":"object", "properties": { "posted": { "type":"boolean" } }, "required":["posted"], "additionalProperties": false }
           JSON
 
-          cat > .ted/post.prompt.txt <<PROMPT
-          Post the following comment to the issue that triggered this workflow, using the GitHub MCP tool "github__add_issue_comment".
-          Determine owner/repo and issue_number from the current workflow context (use GitHub MCP tools if needed).
-          Post EXACTLY this body (do not edit):
+          # Build prompt from agent file + post task wrapper
+          cat .codex/agents/tedthebot.md > .ted/post.prompt.txt
+          cat >> .ted/post.prompt.txt <<PROMPT
+
+          ---
+          POST PHASE TASK (APPROVED)
+
+          Post EXACTLY the following comment body to the issue that triggered this workflow using the MCP tool "github__add_issue_comment".
+          Do not reword or edit. Use the correct owner/repo and issue number for the triggering issue.
+
+          Comment body:
           ---
           ${body}
           ---
