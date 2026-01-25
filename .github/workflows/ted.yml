@@ -37,20 +37,23 @@ jobs:
           esac
 
       # Skip bot actors & commands
-      - name: Guard - skip bots and /ted commands
+      - name: Guard - skip commands/bots (safe)
         if: github.event_name == 'issue_comment'
         run: |
-          set -euo pipefail
-          actor="${{ github.actor }}"
-          body="${{ github.event.comment.body }}"
-          if [[ "$actor" == *"[bot]" ]] || [[ "$actor" == "github-actions" ]] || [[ "$actor" == "github-actions[bot]" ]]; then
+            set -euo pipefail
+
+            actor="${{ github.actor }}"
+            body="$(jq -r '.comment.body // ""' "$GITHUB_EVENT_PATH")"
+
+            if [[ "$actor" == *"[bot]" ]] || [[ "$actor" == "github-actions" ]] || [[ "$actor" == "github-actions[bot]" ]]; then
             echo "Bot actor ($actor); skipping."
             exit 0
-          fi
-          if [[ "$body" =~ ^/ted[[:space:]] ]]; then
+            fi
+
+            if [[ "$body" =~ ^/ted[[:space:]] ]]; then
             echo "Ted command; skipping."
             exit 0
-          fi
+            fi
 
       - name: Install Codex CLI
         run: |
