@@ -122,6 +122,10 @@ Rules:
 - Only propose labels; do not apply labels in draft phase.
 - In post phase, if escalation was approved, apply labels to the same repo/issue as the comment.
 
+If escalate=true and should_post=false:
+- Do not produce a user-facing reply
+- Escalation happens only via labels / dev workflow
+
 ## MCP usage
 - If context is needed, use GitHub MCP tools to read issue body and recent comments.
 - Post comments only in the approved “post phase”.

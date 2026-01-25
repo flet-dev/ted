@@ -21,6 +21,7 @@ jobs:
 
     outputs:
       should_post: ${{ steps.readout.outputs.should_post }}
+      escalate: ${{ steps.readout.outputs.escalate }}
 
     steps:
       - uses: actions/checkout@v4
@@ -148,8 +149,8 @@ jobs:
         id: readout
         run: |
           set -euo pipefail
-          should="$(jq -r '.should_post' .ted/draft.json)"
-          echo "should_post=$should" >> "$GITHUB_OUTPUT"
+          echo "should_post=$(jq -r '.should_post' .ted/draft.json)" >> "$GITHUB_OUTPUT"
+          echo "escalate=$(jq -r '.escalate' .ted/draft.json)" >> "$GITHUB_OUTPUT"
 
       - name: Write draft to job summary (private)
         run: |
@@ -240,6 +241,7 @@ jobs:
           TOML
 
       - name: Post approved draft via MCP (no edits)
+        if: needs.draft.outputs.should_post == 'true'
         env:
           CODEX_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           GITHUB_MCP_BEARER: ${{ steps.app-token.outputs.token }}
@@ -284,6 +286,7 @@ jobs:
           grep -Ei 'tool|error|fail|unauthorized|forbidden|readonly' .ted/codex_events.jsonl || true
 
       - name: Apply escalation labels via MCP (approved)
+        if: needs.draft.outputs.escalate == 'true'
         env:
             CODEX_API_KEY: ${{ secrets.OPENAI_API_KEY }}
             GITHUB_MCP_BEARER: ${{ steps.app-token.outputs.token }}
