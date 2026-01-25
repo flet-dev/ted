@@ -1,0 +1,112 @@
+name: TedTheBot — Approve & Post
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  approve:
+    runs-on: ubuntu-latest
+
+    # Only react to /ted approve on issues (not PRs)
+    if: >
+      github.event.issue.pull_request == null &&
+      startsWith(github.event.comment.body, '/ted approve')
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Guard - only maintainers can approve
+        run: |
+          set -euo pipefail
+          assoc="${{ github.event.comment.author_association }}"
+          case "$assoc" in
+            OWNER|MEMBER|COLLABORATOR) exit 0 ;;
+            *) echo "Not allowed to approve: $assoc"; exit 1 ;;
+          esac
+
+      - name: Install Codex CLI
+        run: |
+          set -euo pipefail
+          curl -L -o /tmp/codex.tgz \
+            https://github.com/openai/codex/releases/latest/download/codex-x86_64-unknown-linux-musl.tar.gz
+          tar -xzf /tmp/codex.tgz -C /tmp
+          mv /tmp/codex-x86_64-unknown-linux-musl /usr/local/bin/codex
+          chmod +x /usr/local/bin/codex
+          codex --version
+
+      - name: Create GitHub App token (IAT)
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.TED_APP_ID }}
+          private-key: ${{ secrets.TED_APP_PRIVATE_KEY }}
+
+      - name: Configure Codex MCP (remote GitHub MCP)
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.codex
+          cat > ~/.codex/config.toml <<'TOML'
+          [mcp_servers.github]
+          url = "https://api.githubcopilot.com/mcp/"
+          bearer_token_env_var = "GITHUB_MCP_BEARER"
+          http_headers = { "X-MCP-Toolsets" = "context,issues,repos" }
+          startup_timeout_sec = 20
+          tool_timeout_sec = 60
+          enabled = true
+          TOML
+
+      - name: Prepare payload + prompt
+        run: |
+          set -euo pipefail
+          mkdir -p .ted
+          cp "${GITHUB_EVENT_PATH}" .ted/event.json
+
+          cat > .ted/out.schema.json <<'JSON'
+          {
+            "type": "object",
+            "properties": {
+              "posted": { "type": "boolean" },
+              "final_body": { "type": "string" }
+            },
+            "required": ["posted", "final_body"],
+            "additionalProperties": false
+          }
+          JSON
+
+          cat > .ted/prompt.txt <<'PROMPT'
+          You are TedTheBot.
+
+          The event payload for "/ted approve" is in .ted/event.json.
+
+          Task:
+          1) Using GitHub MCP tools, read the issue and recent comments.
+          2) Find the most recent Ted draft comment. A draft comment contains:
+             <!-- ted:draft {"kind":"draft","version":1} -->
+          3) Extract ONLY the proposed reply content (not the approval instructions).
+             - The content is the text Ted intended to post as the real reply.
+          4) Post that extracted content as a new issue comment using the MCP tool "github__add_issue_comment".
+          5) Output:
+             - posted=true only if the MCP comment was successfully created
+             - final_body: the exact comment body you posted
+
+          Guardrails:
+          - If no draft is found, post a short comment saying no pending draft exists.
+          - Do not include secrets.
+          - Post exactly one final comment.
+
+          Output must match .ted/out.schema.json.
+          PROMPT
+
+      - name: Run Codex (find draft + post final via MCP)
+        env:
+          CODEX_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GITHUB_MCP_BEARER: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          codex exec --output-schema .ted/out.schema.json -o .ted/out.json "$(cat .ted/prompt.txt)"
+          cat .ted/out.json
