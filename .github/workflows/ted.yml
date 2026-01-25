@@ -1,0 +1,124 @@
+name: TedTheBot
+
+on:
+  issues:
+    types: [opened, edited, reopened]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  ted:
+    runs-on: ubuntu-latest
+
+    # issue_comment also fires on PRs; skip those
+    if: >
+      (github.event_name != 'issue_comment') ||
+      (github.event.issue.pull_request == null)
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Codex CLI
+        run: |
+          set -euo pipefail
+          curl -L -o /tmp/codex.tgz \
+            https://github.com/openai/codex/releases/latest/download/codex-x86_64-unknown-linux-musl.tar.gz
+          tar -xzf /tmp/codex.tgz -C /tmp
+          mv /tmp/codex-x86_64-unknown-linux-musl /usr/local/bin/codex
+          chmod +x /usr/local/bin/codex
+          codex --version
+
+      # GitHub App → Installation Access Token (IAT)
+      - name: Create GitHub App token (IAT)
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.TED_APP_ID }}
+          private-key: ${{ secrets.TED_APP_PRIVATE_KEY }}
+          # optional but recommended to keep the token least-privilege:
+          # permission-issues: write
+          # permission-contents: read
+
+      # Configure Codex to use remote GitHub MCP server (Streamable HTTP)
+      # Note: the upstream docs show PAT here; we're intentionally trying an IAT.
+      - name: Configure Codex MCP (remote)
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.codex
+          cat > ~/.codex/config.toml <<'TOML'
+          [mcp_servers.github]
+          url = "https://api.githubcopilot.com/mcp/"
+          bearer_token_env_var = "GITHUB_MCP_BEARER"
+
+          # Enable only the toolsets you need (keeps tool list smaller & safer)
+          # Remote server supports toolsets via X-MCP-Toolsets. (No readonly, because we want to write comments.)
+          http_headers = { "X-MCP-Toolsets" = "context,issues,repos" }
+
+          startup_timeout_sec = 20
+          tool_timeout_sec = 60
+          enabled = true
+          TOML
+
+      - name: Prepare prompt + schema + event payload
+        run: |
+          set -euo pipefail
+          mkdir -p .ted
+          cp "${GITHUB_EVENT_PATH}" .ted/event.json
+
+          cat > .ted/out.schema.json <<'JSON'
+          {
+            "type": "object",
+            "properties": {
+              "should_comment": { "type": "boolean" },
+              "comment_body": { "type": "string" },
+              "comment_posted": { "type": "boolean" }
+            },
+            "required": ["should_comment", "comment_body", "comment_posted"],
+            "additionalProperties": false
+          }
+          JSON
+
+          cat > .ted/prompt.txt <<'PROMPT'
+          You are TedTheBot (tier-0/tier-1 GitHub support).
+
+          Input:
+          - The full GitHub webhook payload is in .ted/event.json.
+
+          Goals:
+          1) Decide if you should respond (should_comment).
+             - For issue_comment events: respond only if the comment looks like a question/request for help.
+             - Ignore/skip if it's a bot comment, a simple +1, or a non-question.
+          2) If responding, draft a concise, actionable reply (comment_body).
+          3) Post the reply to GitHub *via MCP*, not via direct HTTP calls:
+             - Use the GitHub MCP tool "github__add_issue_comment".
+             - Determine owner/repo + issue_number from the event payload.
+             - The tool schema will tell you the exact parameter names; follow it.
+          4) Set comment_posted=true only if you actually called the MCP tool successfully.
+
+          Guardrails:
+          - Never include secrets/tokens.
+          - If key info is missing, ask for it with a short checklist.
+          - If this is an issue opened event: read the issue body/title and respond.
+          - If this is an issue_comment created event: read the issue and recent thread context before replying.
+
+          Output MUST match .ted/out.schema.json.
+          PROMPT
+
+      - name: Run Codex (and let it post via MCP)
+        env:
+          CODEX_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          # This is the crucial experiment: use GitHub App IAT as Bearer token for remote MCP
+          GITHUB_MCP_BEARER: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          codex exec \
+            --output-schema .ted/out.schema.json \
+            -o .ted/out.json \
+            "$(cat .ted/prompt.txt)"
+
+          echo "===== Codex output ====="
+          cat .ted/out.json
