@@ -1,4 +1,4 @@
-name: TedTheBot
+name: TedTheBot (draft + approval)
 
 on:
   issues:
@@ -11,16 +11,46 @@ permissions:
   issues: write
 
 jobs:
-  ted:
+  draft:
     runs-on: ubuntu-latest
 
-    # issue_comment also fires on PRs; skip those
+    # Skip PRs (issue_comment triggers for PRs too)
     if: >
       (github.event_name != 'issue_comment') ||
       (github.event.issue.pull_request == null)
 
+    outputs:
+      should_post: ${{ steps.readout.outputs.should_post }}
+
     steps:
       - uses: actions/checkout@v4
+
+      # Optional: only act on trusted commenters for issue_comment
+      - name: Guard - trusted commenters only
+        if: github.event_name == 'issue_comment'
+        run: |
+          set -euo pipefail
+          assoc="${{ github.event.comment.author_association }}"
+          case "$assoc" in
+            OWNER|MEMBER|COLLABORATOR) exit 0 ;;
+            *) echo "Untrusted author_association=$assoc; skipping."; exit 0 ;;
+          esac
+
+      # Skip bot actors & commands
+      - name: Guard - skip bots and /ted commands
+        if: github.event_name == 'issue_comment'
+        run: |
+          set -euo pipefail
+          actor="${{ github.actor }}"
+          body="${{ github.event.comment.body }}"
+          if [[ "$actor" == *"[bot]" ]] || [[ "$actor" == "github-actions" ]] || [[ "$actor" == "github-actions[bot]" ]]; then
+            echo "Bot actor ($actor); skipping."
+            exit 0
+          fi
+          if [[ "$body" =~ ^/ted[[:space:]] ]]; then
+            echo "Ted command; skipping."
+            exit 0
+          fi
 
       - name: Install Codex CLI
         run: |
@@ -32,20 +62,15 @@ jobs:
           chmod +x /usr/local/bin/codex
           codex --version
 
-      # GitHub App → Installation Access Token (IAT)
+      # GitHub App IAT for *reading via MCP* during draft generation
       - name: Create GitHub App token (IAT)
         id: app-token
         uses: actions/create-github-app-token@v1
         with:
           app-id: ${{ secrets.TED_APP_ID }}
           private-key: ${{ secrets.TED_APP_PRIVATE_KEY }}
-          # optional but recommended to keep the token least-privilege:
-          # permission-issues: write
-          # permission-contents: read
 
-      # Configure Codex to use remote GitHub MCP server (Streamable HTTP)
-      # Note: the upstream docs show PAT here; we're intentionally trying an IAT.
-      - name: Configure Codex MCP (remote)
+      - name: Configure Codex MCP (remote GitHub MCP)
         run: |
           set -euo pipefail
           mkdir -p ~/.codex
@@ -53,72 +78,159 @@ jobs:
           [mcp_servers.github]
           url = "https://api.githubcopilot.com/mcp/"
           bearer_token_env_var = "GITHUB_MCP_BEARER"
-
-          # Enable only the toolsets you need (keeps tool list smaller & safer)
-          # Remote server supports toolsets via X-MCP-Toolsets. (No readonly, because we want to write comments.)
           http_headers = { "X-MCP-Toolsets" = "context,issues,repos" }
-
           startup_timeout_sec = 20
           tool_timeout_sec = 60
           enabled = true
           TOML
 
-      - name: Prepare prompt + schema + event payload
+      - name: Prepare prompt + schema + payload
         run: |
           set -euo pipefail
           mkdir -p .ted
           cp "${GITHUB_EVENT_PATH}" .ted/event.json
 
-          cat > .ted/out.schema.json <<'JSON'
+          cat > .ted/draft.schema.json <<'JSON'
           {
             "type": "object",
             "properties": {
-              "should_comment": { "type": "boolean" },
-              "comment_body": { "type": "string" },
-              "comment_posted": { "type": "boolean" }
+              "should_post": { "type": "boolean" },
+              "draft_body": { "type": "string" }
             },
-            "required": ["should_comment", "comment_body", "comment_posted"],
+            "required": ["should_post", "draft_body"],
             "additionalProperties": false
           }
           JSON
 
-          cat > .ted/prompt.txt <<'PROMPT'
+          cat > .ted/draft.prompt.txt <<'PROMPT'
           You are TedTheBot (tier-0/tier-1 GitHub support).
 
-          Input:
-          - The full GitHub webhook payload is in .ted/event.json.
+          The full GitHub webhook payload is in .ted/event.json.
 
-          Goals:
-          1) Decide if you should respond (should_comment).
-             - For issue_comment events: respond only if the comment looks like a question/request for help.
-             - Ignore/skip if it's a bot comment, a simple +1, or a non-question.
-          2) If responding, draft a concise, actionable reply (comment_body).
-          3) Post the reply to GitHub *via MCP*, not via direct HTTP calls:
-             - Use the GitHub MCP tool "github__add_issue_comment".
-             - Determine owner/repo + issue_number from the event payload.
-             - The tool schema will tell you the exact parameter names; follow it.
-          4) Set comment_posted=true only if you actually called the MCP tool successfully.
+          Task:
+          1) Decide whether a reply is needed (should_post).
+             - For issue_comment: reply only if the new comment is a question / help request.
+             - Skip "+1", "thanks", emojis, or non-questions.
+          2) If replying, draft a concise, actionable response (draft_body).
+          3) DO NOT post anything to GitHub in this step.
 
-          Guardrails:
-          - Never include secrets/tokens.
-          - If key info is missing, ask for it with a short checklist.
-          - If this is an issue opened event: read the issue body/title and respond.
-          - If this is an issue_comment created event: read the issue and recent thread context before replying.
+          Guidance:
+          - If needed, use GitHub MCP tools to read the issue and recent comments for context.
+          - Never include secrets.
+          - If info is missing, ask with a short checklist.
 
-          Output MUST match .ted/out.schema.json.
+          Output MUST match .ted/draft.schema.json.
           PROMPT
 
-      - name: Run Codex (and let it post via MCP)
+      - name: Run Codex (generate draft only)
         env:
           CODEX_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          # This is the crucial experiment: use GitHub App IAT as Bearer token for remote MCP
           GITHUB_MCP_BEARER: ${{ steps.app-token.outputs.token }}
         run: |
           set -euo pipefail
-          codex exec \
-            --output-schema .ted/out.schema.json \
-            -o .ted/out.json \
-            "$(cat .ted/prompt.txt)"
+          codex exec --output-schema .ted/draft.schema.json -o .ted/draft.json "$(cat .ted/draft.prompt.txt)"
+          cat .ted/draft.json
 
-          echo "===== Codex output ====="
-          cat .ted/out.json
+      - name: Expose should_post output
+        id: readout
+        run: |
+          set -euo pipefail
+          should="$(jq -r '.should_post' .ted/draft.json)"
+          echo "should_post=$should" >> "$GITHUB_OUTPUT"
+
+      - name: Write draft to job summary (private)
+        run: |
+          set -euo pipefail
+          should="$(jq -r '.should_post' .ted/draft.json)"
+          echo "## 🤖 TedTheBot draft" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**should_post:** \`$should\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Proposed reply" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo '```md' >> "$GITHUB_STEP_SUMMARY"
+          jq -r '.draft_body' .ted/draft.json >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload draft artifact (private)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ted-draft
+          path: .ted/draft.json
+
+  post:
+    needs: draft
+    runs-on: ubuntu-latest
+
+    # Only run when Ted decided a reply is needed
+    if: needs.draft.outputs.should_post == 'true'
+
+    # Manual approval gate
+    environment: ted-approval
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download draft artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ted-draft
+          path: .ted
+
+      - name: Install Codex CLI
+        run: |
+          set -euo pipefail
+          curl -L -o /tmp/codex.tgz \
+            https://github.com/openai/codex/releases/latest/download/codex-x86_64-unknown-linux-musl.tar.gz
+          tar -xzf /tmp/codex.tgz -C /tmp
+          mv /tmp/codex-x86_64-unknown-linux-musl /usr/local/bin/codex
+          chmod +x /usr/local/bin/codex
+          codex --version
+
+      # Fresh IAT in this job (recommended; previous job’s token is revoked by default)
+      - name: Create GitHub App token (IAT)
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.TED_APP_ID }}
+          private-key: ${{ secrets.TED_APP_PRIVATE_KEY }}
+
+      - name: Configure Codex MCP (remote GitHub MCP)
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.codex
+          cat > ~/.codex/config.toml <<'TOML'
+          [mcp_servers.github]
+          url = "https://api.githubcopilot.com/mcp/"
+          bearer_token_env_var = "GITHUB_MCP_BEARER"
+          http_headers = { "X-MCP-Toolsets" = "context,issues,repos" }
+          startup_timeout_sec = 20
+          tool_timeout_sec = 60
+          enabled = true
+          TOML
+
+      - name: Post approved draft via MCP (Codex makes the tool call)
+        env:
+          CODEX_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GITHUB_MCP_BEARER: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          test -f .ted/draft.json
+          body="$(jq -r '.draft_body' .ted/draft.json)"
+
+          cat > .ted/post.schema.json <<'JSON'
+          { "type":"object", "properties": { "posted": { "type":"boolean" } }, "required":["posted"], "additionalProperties": false }
+          JSON
+
+          cat > .ted/post.prompt.txt <<PROMPT
+          Post the following comment to the issue that triggered this workflow, using the GitHub MCP tool "github__add_issue_comment".
+          Determine owner/repo and issue_number from the current workflow context (use GitHub MCP tools if needed).
+          Post EXACTLY this body (do not edit):
+          ---
+          ${body}
+          ---
+          Output {"posted": true} only if the MCP tool call succeeded.
+          PROMPT
+
+          codex exec --output-schema .ted/post.schema.json -o .ted/post.out.json "$(cat .ted/post.prompt.txt)"
+          cat .ted/post.out.json
