@@ -185,7 +185,7 @@ jobs:
     needs: draft
     runs-on: ubuntu-latest
 
-    if: needs.draft.outputs.should_post == 'true'
+    if: needs.draft.outputs.should_post == 'true' || needs.draft.outputs.escalate == 'true'
 
     # Approval gate — configure in repo Settings → Environments → "ted-approval"
     environment: ted-approval
