@@ -174,6 +174,14 @@ jobs:
           name: ted-draft
           path: .ted
 
+      - name: Capture target repo + issue
+        run: |
+          set -euo pipefail
+          echo "${{ github.repository }}" > .ted/target_repo.txt
+          echo "${{ github.event.issue.number }}" > .ted/target_issue.txt
+          echo "Target repo: $(cat .ted/target_repo.txt)"
+          echo "Target issue: $(cat .ted/target_issue.txt)"
+
       - name: Install Codex CLI
         run: |
           set -euo pipefail
@@ -224,6 +232,13 @@ jobs:
 
           ---
           POST PHASE TASK (APPROVED)
+
+          You MUST post the comment using GitHub MCP to:
+
+          Repository: read from file .ted/target_repo.txt
+          Issue number: read from file .ted/target_issue.txt
+
+          You are NOT allowed to infer or guess the repository or issue.
 
           Post EXACTLY the following comment body to the issue that triggered this workflow using the MCP tool "github__add_issue_comment".
           Do not reword or edit. Use the correct owner/repo and issue number for the triggering issue.
