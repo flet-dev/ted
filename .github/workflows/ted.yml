@@ -10,6 +10,9 @@ permissions:
   contents: read
   issues: write
 
+env:
+  CODEX_MODEL: gpt-5.2-codex-max
+
 jobs:
   draft:
     runs-on: ubuntu-latest
