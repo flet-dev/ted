@@ -135,61 +135,8 @@ jobs:
           private-key: ${{ secrets.TED_APP_PRIVATE_KEY }}
 
       - name: Post approved draft via GitHub API (IAT only)
-        if: needs.draft.outputs.should_post == 'true'
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           set -euo pipefail
-          repo_full="$(cat .ted/target_repo.txt)"      # e.g. flet-dev/ted
-          issue_no="$(cat .ted/target_issue.txt)"      # e.g. 232
-          body="$(jq -r '.draft_body' .ted/draft.json)"
-
-          body_json="$(jq -Rs . <<<"$body")"
-          payload="{\"body\":$body_json}"
-
-          curl -sS -f \
-            -X POST \
-            -H "Authorization: Bearer $GITHUB_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/$repo_full/issues/$issue_no/comments" \
-            -d "$payload" >/tmp/ted_post.json
-
-          echo "Posted comment: $(jq -r '.html_url // empty' /tmp/ted_post.json)"
-
-      - name: Apply escalation labels via GitHub API (IAT only)
-        if: needs.draft.outputs.escalate == 'true'
-        env:
-            GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
-        run: |
-            set -euo pipefail
-
-            # Only run if escalation was requested in the approved draft
-            esc="$(jq -r '.escalate' .ted/draft.json)"
-            if [[ "$esc" != "true" ]]; then
-            echo "No escalation requested."
-            exit 0
-            fi
-
-            # Write canonical target (prevents cross-repo mistakes)
-            repo_full="$(cat .ted/target_repo.txt)"      # e.g. flet-dev/ted
-            issue_no="$(cat .ted/target_issue.txt)"      # e.g. 232
-
-            # Labels to add
-            jq -r '.labels_to_add[]' .ted/draft.json > .ted/labels.txt || true
-
-            if [[ ! -s .ted/labels.txt ]]; then
-            echo "Escalate=true but labels_to_add empty; skipping."
-            exit 0
-            fi
-
-            labels_json="$(jq -R -s 'split("\n") | map(select(length>0))' .ted/labels.txt)"
-            payload="{\"labels\":$labels_json}"
-
-            curl -sS -f \
-              -X POST \
-              -H "Authorization: Bearer $GITHUB_TOKEN" \
-              -H "Accept: application/vnd.github+json" \
-              "https://api.github.com/repos/$repo_full/issues/$issue_no/labels" \
-              -d "$payload" >/tmp/ted_labels.json
-
-            echo "Applied labels: $(jq -r '.[]?.name // empty' /tmp/ted_labels.json | paste -sd, -)"
+          python3 .github/scripts/ted_post.py
