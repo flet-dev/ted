@@ -85,109 +85,14 @@ jobs:
           enabled = true
           TOML
 
-      - name: Prepare prompt (from files) + schema + payload
-        run: |
-          set -euo pipefail
-          mkdir -p .ted
-
-          # Save event payload for Codex to read
-          cp "$GITHUB_EVENT_PATH" .ted/event.json
-
-          # Output schema for draft phase
-          cat > .ted/draft.schema.json <<'JSON'
-          {
-          "type": "object",
-          "properties": {
-              "should_post": { "type": "boolean" },
-              "draft_body": { "type": "string" },
-
-              "escalate": { "type": "boolean" },
-              "labels_to_add": {
-              "type": "array",
-              "items": { "type": "string" }
-              },
-              "dev_summary": { "type": "string" }
-            },
-            "required": ["should_post", "draft_body", "escalate", "labels_to_add", "dev_summary"],
-            "additionalProperties": false
-          }
-          JSON
-
-          # Build prompt from agent file + a small task wrapper (no hard-coded agent rules here)
-          cat .codex/agents/tedthebot.md > .ted/prompt.txt
-          cat >> .ted/prompt.txt <<'PROMPT'
-
-          ---
-          DRAFT PHASE TASK
-
-          The GitHub webhook payload is in: .ted/event.json
-
-          Produce JSON that matches .ted/draft.schema.json:
-          - should_post: true only if a helpful reply is warranted
-          - draft_body: the proposed reply in GitHub-flavored Markdown
-
-          Also decide if this should be escalated to developers.
-
-          - If escalate=true, include "needs-dev" in labels_to_add.
-          - labels_to_add must be a small set (0-5), from: needs-dev, bug, regression, needs-repro, platform:macos, platform:windows, platform:linux, platform:web, platform:ios, platform:android
-          - dev_summary must be a short 3-6 bullet summary for maintainers (no secrets).
-
-            Do NOT apply labels in draft phase.
-
-          Constraints:
-          - Do NOT post to GitHub in draft phase.
-          - If you need more context, use GitHub MCP tools to read the issue and recent comments.
-          PROMPT
-
-      - name: Run Codex (generate draft only)
+      - name: Draft via Python (prepare, run Codex, summarize)
+        id: readout
         env:
           CODEX_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           GITHUB_MCP_BEARER: ${{ steps.app-token.outputs.token }}
         run: |
           set -euo pipefail
-          codex exec --output-schema .ted/draft.schema.json -o .ted/draft.json "$(cat .ted/prompt.txt)"
-          cat .ted/draft.json
-
-      - name: Expose should_post output
-        id: readout
-        run: |
-          set -euo pipefail
-          echo "should_post=$(jq -r '.should_post' .ted/draft.json)" >> "$GITHUB_OUTPUT"
-          echo "escalate=$(jq -r '.escalate' .ted/draft.json)" >> "$GITHUB_OUTPUT"
-
-      - name: Write draft to job summary (private)
-        run: |
-          set -euo pipefail
-          summary="$GITHUB_STEP_SUMMARY"
-          should="$(jq -r '.should_post' .ted/draft.json)"
-          {
-            printf '%s\n' \
-              "## 🤖 TedTheBot draft" \
-              "" \
-              "**should_post:** \`$should\`" \
-              "" \
-              "### Proposed reply" \
-              "" \
-              "```md"
-            jq -r '.draft_body' .ted/draft.json
-            printf '%s\n' \
-              "```" \
-              "### Escalation" \
-              ""
-            printf -- "- escalate: %s\n" "$(jq -r '.escalate' .ted/draft.json)"
-            printf '%s\n' \
-              "- labels_to_add:" \
-              "```"
-            jq -r '(.labels_to_add // [])[] | "- " + .' .ted/draft.json
-            printf '%s\n' \
-              "```" \
-              "" \
-              "### Dev summary" \
-              "" \
-              "```"
-            jq -r '.dev_summary' .ted/draft.json
-            printf '%s\n' "```"
-          } >> "$summary"
+          python3 .github/scripts/ted_draft.py
 
       - name: Upload draft artifact (private)
         uses: actions/upload-artifact@v4
