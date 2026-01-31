@@ -158,29 +158,36 @@ jobs:
       - name: Write draft to job summary (private)
         run: |
           set -euo pipefail
+          summary="$GITHUB_STEP_SUMMARY"
           should="$(jq -r '.should_post' .ted/draft.json)"
-          echo "## 🤖 TedTheBot draft" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "**should_post:** \`$should\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "### Proposed reply" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo '```md' >> "$GITHUB_STEP_SUMMARY"
-          jq -r '.draft_body' .ted/draft.json >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-          echo "### Escalation" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "- escalate: $(jq -r '.escalate' .ted/draft.json)" >> "$GITHUB_STEP_SUMMARY"
-          echo "- labels_to_add:" >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-          jq -r '(.labels_to_add // [])[] | "- " + .' .ted/draft.json >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "### Dev summary" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-          jq -r '.dev_summary' .ted/draft.json >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          {
+            printf '%s\n' \
+              "## 🤖 TedTheBot draft" \
+              "" \
+              "**should_post:** \`$should\`" \
+              "" \
+              "### Proposed reply" \
+              "" \
+              "```md"
+            jq -r '.draft_body' .ted/draft.json
+            printf '%s\n' \
+              "```" \
+              "### Escalation" \
+              ""
+            printf -- "- escalate: %s\n" "$(jq -r '.escalate' .ted/draft.json)"
+            printf '%s\n' \
+              "- labels_to_add:" \
+              "```"
+            jq -r '(.labels_to_add // [])[] | "- " + .' .ted/draft.json
+            printf '%s\n' \
+              "```" \
+              "" \
+              "### Dev summary" \
+              "" \
+              "```"
+            jq -r '.dev_summary' .ted/draft.json
+            printf '%s\n' "```"
+          } >> "$summary"
 
       - name: Upload draft artifact (private)
         uses: actions/upload-artifact@v4
